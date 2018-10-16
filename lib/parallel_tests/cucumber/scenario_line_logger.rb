@@ -1,4 +1,4 @@
-require 'gherkin/tag_expression'
+require 'cucumber/core/gherkin/tag_expression'
 
 module ParallelTests
   module Cucumber
@@ -6,41 +6,36 @@ module ParallelTests
       class ScenarioLineLogger
         attr_reader :scenarios
 
-        def initialize(tag_expression = ::Gherkin::TagExpression.new([]))
-          raise "ScenarioLineLogger not supported anymore after upgrading to Cucumber 2.0, please fix!"
+        def initialize(tag_expression = ::Cucumber::Core::Gherkin::TagExpression.new([]))
           @scenarios = []
           @tag_expression = tag_expression
         end
 
-        def visit_feature_element(feature_element)
-          return unless @tag_expression.evaluate(feature_element.source_tags)
+        def visit_feature_element(uri, feature_element, feature_tags, line_numbers: [])
+          scenario_tags = feature_element[:tags].map {|tag| ::Cucumber::Core::Ast::Tag.new(tag[:location], tag[:name])}
+          scenario_tags = feature_tags + scenario_tags
+          if feature_element[:examples].nil? # :Scenario
+            test_line = feature_element[:location][:line]
 
-          case feature_element
-          when ::Cucumber::Ast::Scenario
-            line = if feature_element.respond_to?(:line)
-              feature_element.line
-            else
-              feature_element.instance_variable_get(:@line)
-            end
-            @scenarios << [feature_element.feature.file, line].join(":")
-          when ::Cucumber::Ast::ScenarioOutline
-            sections = feature_element.instance_variable_get(:@example_sections)
-            sections.each { |section|
-              rows = if section[1].respond_to?(:rows)
-                section[1].rows
-              else
-                section[1].instance_variable_get(:@rows)
+            # We don't accept the feature_element if the current tags are not valid
+            return unless @tag_expression.evaluate(scenario_tags)
+            # or if it is not at the correct location
+            return if line_numbers.any? && !line_numbers.include?(test_line)
+
+            @scenarios << [uri, feature_element[:location][:line]].join(":")
+          else # :ScenarioOutline
+            feature_element[:examples].each do |example|
+              example_tags = example[:tags].map {|tag| ::Cucumber::Core::Ast::Tag.new(tag[:location], tag[:name])}
+              example_tags = scenario_tags + example_tags
+              next unless @tag_expression.evaluate(example_tags)
+              rows = example[:tableBody].select { |body| body[:type] == :TableRow }
+              rows.each do |row|
+                test_line = row[:location][:line]
+                next if line_numbers.any? && !line_numbers.include?(test_line)
+
+                @scenarios << [uri, test_line].join(':')
               end
-              rows.each_with_index { |row, index|
-                next if index == 0  # slices didn't work with jruby data structure
-                line = if row.respond_to?(:line)
-                  row.line
-                else
-                  row.instance_variable_get(:@line)
-                end
-                @scenarios << [feature_element.feature.file, line].join(":")
-              }
-            }
+            end
           end
         end
 

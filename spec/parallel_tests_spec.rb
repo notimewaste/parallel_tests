@@ -70,8 +70,14 @@ describe ParallelTests do
   end
 
   describe ".wait_for_other_processes_to_finish" do
+    around do |example|
+      ParallelTests.with_pid_file do
+        example.run
+      end
+    end
+    
     def with_running_processes(count, wait=0.2)
-      count.times { Thread.new{ `TEST_ENV_NUMBER=1; sleep #{wait}` } }
+      count.times { |x| ParallelTests.pids.add(x) }
       sleep 0.1
       yield
     ensure
@@ -84,7 +90,7 @@ describe ParallelTests do
     end
 
     it "stops if only itself is running" do
-      ENV["TEST_ENV_NUMBER"] = "2"
+      ParallelTests.pids.add(123)
       expect(ParallelTests).not_to receive(:sleep)
       with_running_processes(1) do
         ParallelTests.wait_for_other_processes_to_finish
@@ -97,6 +103,7 @@ describe ParallelTests do
       counter = 0
       allow(ParallelTests).to receive(:sleep) do
         sleep 0.1;
+        ParallelTests.pids.delete(1) if counter > 3
         counter += 1
       end
 
@@ -108,13 +115,19 @@ describe ParallelTests do
   end
 
   describe ".number_of_running_processes" do
+    around do |example|
+      ParallelTests.with_pid_file do
+        example.run
+      end
+    end
+    
     it "is 0 for nothing" do
       expect(ParallelTests.number_of_running_processes).to eq(0)
     end
 
     it "is 2 when 2 are running" do
       wait = 0.2
-      2.times { Thread.new { `TEST_ENV_NUMBER=1; sleep #{wait}` } }
+      2.times { |x| ParallelTests.pids.add(123) }
       sleep wait / 2
       expect(ParallelTests.number_of_running_processes).to eq(2)
       sleep wait
@@ -131,9 +144,54 @@ describe ParallelTests do
       expect(ParallelTests.first_process?).to eq(true)
     end
 
-    it "is not first if env is set to something" do
+    it "is first if env is set to 1" do
+      ENV["TEST_ENV_NUMBER"] = "1"
+      expect(ParallelTests.first_process?).to eq(true)
+    end
+
+    it "is not first if env is set to something else" do
       ENV["TEST_ENV_NUMBER"] = "2"
       expect(ParallelTests.first_process?).to eq(false)
+    end
+  end
+
+  describe ".last_process?" do
+    it "is last if no envs are set" do
+      expect(ParallelTests.last_process?).to eq(true)
+    end
+
+    it "is last if envs are set to blank" do
+      ENV["TEST_ENV_NUMBER"] = ""
+      ENV["PARALLEL_TEST_GROUPS"] = ""
+      expect(ParallelTests.last_process?).to eq(true)
+    end
+
+    it "is last if TEST_ENV_NUMBER is set to PARALLEL_TEST_GROUPS" do
+      ENV["TEST_ENV_NUMBER"] = "4"
+      ENV["PARALLEL_TEST_GROUPS"] = "4"
+      expect(ParallelTests.last_process?).to eq(true)
+    end
+
+    it "is not last if TEST_ENV_NUMBER is set to else" do
+      ENV["TEST_ENV_NUMBER"] = "2"
+      ENV["PARALLEL_TEST_GROUPS"] = "4"
+      expect(ParallelTests.first_process?).to eq(false)
+    end
+  end
+
+  describe ".stop_all_processes" do
+    # Process.kill on Windows doesn't work as expected. It kills all process group instead of just one process.
+    it 'kills the running child process' do
+      ParallelTests.with_pid_file do
+        Thread.new do
+          ParallelTests::Test::Runner.execute_command('sleep 3', 1, 1, {})
+        end
+        sleep(0.2)
+        expect(ParallelTests.pids.count).to eq(1)
+        ParallelTests.stop_all_processes
+        sleep(0.2)
+        expect(ParallelTests.pids.count).to eq(0)
+      end
     end
   end
 

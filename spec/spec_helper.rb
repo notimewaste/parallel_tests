@@ -1,11 +1,18 @@
 require 'bundler/setup'
 require 'tempfile'
 require 'tmpdir'
+require 'timeout'
 
 require 'parallel_tests'
 require 'parallel_tests/test/runtime_logger'
 require 'parallel_tests/rspec/runtime_logger'
 require 'parallel_tests/rspec/summary_logger'
+
+String.class_eval do
+  def strip_heredoc
+    gsub(/^#{self[/^\s*/]}/, '')
+  end
+end
 
 OutputLogger = Struct.new(:output) do
   attr_reader :flock, :flush
@@ -34,8 +41,8 @@ module SpecHelper
     Dir.mktmpdir do |root|
       files.each do |file|
         parent = "#{root}/#{File.dirname(file)}"
-        `mkdir -p #{parent}` unless File.exist?(parent)
-        `touch #{root}/#{file}`
+        FileUtils.mkpath(parent) unless File.exist?(parent)
+        FileUtils.touch(File.join(root, file))
       end
       yield root
     end
@@ -159,6 +166,20 @@ module SharedExamples
   end
 end
 
+RSpec::Matchers.define :include_exactly_times do |expected, times|
+  match do |actual|
+    actual.scan(expected).size == times
+  end
+
+  failure_message do |actual|
+    "expected the following string:\n" +
+        '""""' + "\n" + actual + "\n" + '""""' + "\n" +
+        (expected.is_a?(String) ? "to contain '#{expected}'" : "to match /#{expected}/") +
+        " #{times} time(s), but it " + (expected.is_a?(String) ? "appears" : "matches") +
+        " #{actual.scan(expected).size} time(s)\n"
+  end
+end
+
 RSpec.configure do |config|
   config.filter_run :focus => true
   config.run_all_when_everything_filtered = true
@@ -174,6 +195,7 @@ RSpec.configure do |config|
   end
 
   config.after do
+    ENV.delete "PARALLEL_TEST_GROUPS"
     ENV.delete "PARALLEL_TEST_PROCESSORS"
     ENV.delete "PARALLEL_TESTS_EXECUTABLE"
     ENV.delete "TEST_ENV_NUMBER"

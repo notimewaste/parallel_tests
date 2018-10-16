@@ -44,7 +44,7 @@ module ParallelTests
         # 1 scenario (1 failed)
         # 1 step (1 failed)
         def summarize_results(results)
-          sort_order = %w[scenario step failed undefined skipped pending passed]
+          sort_order = %w[scenario step failed flaky undefined skipped pending passed]
 
           %w[scenario step].map do |group|
             group_results = results.grep(/^\d+ #{group}/)
@@ -100,11 +100,11 @@ module ParallelTests
         def determine_executable
           case
           when File.exist?("bin/#{name}")
-            "bin/#{name}"
+            ParallelTests.with_ruby_binary("bin/#{name}")
           when ParallelTests.bundler_enabled?
             "bundle exec #{name}"
           when File.file?("script/#{name}")
-            "script/#{name}"
+            ParallelTests.with_ruby_binary("script/#{name}")
           else
             "#{name}"
           end

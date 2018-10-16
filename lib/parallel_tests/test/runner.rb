@@ -30,9 +30,9 @@ module ParallelTests
           execute_command(cmd, process_number, num_processes, options)
         end
 
+        # ignores other commands runner noise
         def line_is_result?(line)
-          line.gsub!(/[.F*]/,'')
-          line =~ /\d+ failure/
+          line =~ /\d+ failure(?!:)/
         end
 
         # --- usually used by other runners
@@ -52,7 +52,7 @@ module ParallelTests
           when :filesize
             sort_by_filesize(tests)
           when :runtime
-            sort_by_runtime(tests, runtimes(tests, options), options.merge(allowed_missing: 0.5))
+            sort_by_runtime(tests, runtimes(tests, options), options.merge(allowed_missing: (options[:allowed_missing_percent] || 50) / 100.0))
           when nil
             # use recorded test runtime if we got enough data
             runtimes = runtimes(tests, options) rescue []
@@ -71,49 +71,58 @@ module ParallelTests
 
         def execute_command(cmd, process_number, num_processes, options)
           env = (options[:env] || {}).merge(
-            "TEST_ENV_NUMBER" => test_env_number(process_number),
-            "PARALLEL_TEST_GROUPS" => num_processes
+            "TEST_ENV_NUMBER" => test_env_number(process_number, options).to_s,
+            "PARALLEL_TEST_GROUPS" => num_processes.to_s,
+            "PARALLEL_PID_FILE" => ParallelTests.pid_file_path,
           )
           cmd = "nice #{cmd}" if options[:nice]
           cmd = "#{cmd} 2>&1" if options[:combine_stderr]
+
           puts cmd if options[:verbose]
 
-          execute_command_and_capture_output(env, cmd, options[:serialize_stdout])
+          execute_command_and_capture_output(env, cmd, options)
         end
 
-        def execute_command_and_capture_output(env, cmd, silence)
-          # make processes descriptive / visible in ps -ef
-          separator = (WINDOWS ? ' & ' : ';')
-          exports = env.map do |k,v|
-            if WINDOWS
-              "(SET \"#{k}=#{v}\")"
-            else
-              "#{k}=#{v};export #{k}"
-            end
-          end.join(separator)
-          cmd = "#{exports}#{separator}#{cmd}"
-
-          output = open("|#{cmd}", "r") { |output| capture_output(output, silence) }
+        def execute_command_and_capture_output(env, cmd, options)
+          pid = nil
+          output = IO.popen(env, cmd) do |io|
+            pid = io.pid
+            ParallelTests.pids.add(pid)
+            capture_output(io, env, options)
+          end
+          ParallelTests.pids.delete(pid) if pid
           exitstatus = $?.exitstatus
+          seed = output[/seed (\d+)/,1]
 
-          {:stdout => output, :exit_status => exitstatus}
+          {:stdout => output, :exit_status => exitstatus, :command => cmd, :seed => seed}
         end
 
         def find_results(test_output)
-          test_output.split("\n").map {|line|
-            line.gsub!(/\e\[\d+m/,'')
+          test_output.lines.map do |line|
+            line.chomp!
+            line.gsub!(/\e\[\d+m/, '') # remove color coding
             next unless line_is_result?(line)
             line
-          }.compact
+          end.compact
         end
 
-        def test_env_number(process_number)
-          process_number == 0 ? '' : process_number + 1
+        def test_env_number(process_number, options={})
+          if process_number == 0 && !options[:first_is_1]
+            ''
+          else
+            process_number + 1
+          end
         end
 
         def summarize_results(results)
           sums = sum_up_results(results)
           sums.sort.map{|word, number|  "#{number} #{word}#{'s' if number != 1}" }.join(', ')
+        end
+
+        # remove old seed and add new seed
+        def command_with_seed(cmd, seed)
+          clean = cmd.sub(/\s--seed\s+\d+\b/, '')
+          "#{clean} --seed #{seed}"
         end
 
         protected
@@ -136,7 +145,7 @@ module ParallelTests
         end
 
         # read output of the process and print it in chunks
-        def capture_output(out, silence)
+        def capture_output(out, env, options={})
           result = ""
           loop do
             begin
@@ -145,8 +154,10 @@ module ParallelTests
                 read = read.force_encoding(Encoding.default_internal)
               end
               result << read
-              unless silence
-                $stdout.print read
+              unless options[:serialize_stdout]
+                message = read
+                message = "[TEST GROUP #{env['TEST_ENV_NUMBER']}] #{message}" if options[:prefix_output_with_test_env_number]
+                $stdout.print message
                 $stdout.flush
               end
             end
@@ -162,7 +173,10 @@ module ParallelTests
           tests.sort!
           tests.map! do |test|
             allowed_missing -= 1 unless time = runtimes[test]
-            raise "Too little runtime info" if allowed_missing < 0
+            if allowed_missing < 0
+              log = options[:runtime_log] || runtime_log
+              raise "Runtime log file '#{log}' does not contain sufficient data to sort #{tests.size} test files, please update it."
+            end
             [test, time]
           end
 
@@ -170,17 +184,18 @@ module ParallelTests
             puts "Runtime found for #{tests.count(&:last)} of #{tests.size} tests"
           end
 
-          # fill gaps with average runtime
+          # fill gaps with unknown-runtime if given, average otherwise
           known, unknown = tests.partition(&:last)
           average = (known.any? ? known.map!(&:last).inject(:+) / known.size : 1)
-          unknown.each { |set| set[1] = average }
+          unknown_runtime = options[:unknown_runtime] || average
+          unknown.each { |set| set[1] = unknown_runtime }
         end
 
         def runtimes(tests, options)
           log = options[:runtime_log] || runtime_log
           lines = File.read(log).split("\n")
           lines.each_with_object({}) do |line, times|
-            test, time = line.split(":", 2)
+            test, _, time = line.rpartition(':')
             next unless test and time
             times[test] = time.to_f if tests.include?(test)
           end
@@ -195,7 +210,7 @@ module ParallelTests
           (tests || []).map do |file_or_folder|
             if File.directory?(file_or_folder)
               files = files_in_folder(file_or_folder, options)
-              files.grep(test_suffix).grep(options[:pattern]||//)
+              files.grep(options[:suffix]||test_suffix).grep(options[:pattern]||//)
             else
               file_or_folder
             end

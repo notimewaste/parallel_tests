@@ -18,7 +18,7 @@ describe ParallelTests::RSpec::RuntimeLogger do
       end
 
       example = double(:file_path => "#{Dir.pwd}/spec/foo.rb")
-      if ParallelTests::RSpec::RuntimeLogger::RSPEC_3
+      unless ParallelTests::RSpec::RuntimeLogger::RSPEC_2
         example = double(:group => example)
       end
 
@@ -89,7 +89,7 @@ describe ParallelTests::RSpec::RuntimeLogger do
         RUBY
       end
 
-      system("TEST_ENV_NUMBER=1 rspec spec -I #{Bundler.root.join("lib")} --format ParallelTests::RSpec::RuntimeLogger --out runtime.log 2>&1") || raise("nope")
+      system({'TEST_ENV_NUMBER' => '1'}, "rspec spec -I #{Bundler.root.join("lib")} --format ParallelTests::RSpec::RuntimeLogger --out runtime.log 2>&1") || raise("nope")
 
       result = File.read("runtime.log")
       expect(result).to match(%r{^spec/a_spec.rb:0.5})
@@ -118,7 +118,7 @@ describe ParallelTests::RSpec::RuntimeLogger do
         end
       RUBY
 
-      system("TEST_ENV_NUMBER=1 rspec spec -I #{Bundler.root.join("lib")} --format ParallelTests::RSpec::RuntimeLogger --out runtime.log 2>&1") || raise("nope")
+      system({'TEST_ENV_NUMBER' => '1'}, "rspec spec -I #{Bundler.root.join("lib")} --format ParallelTests::RSpec::RuntimeLogger --out runtime.log 2>&1") || raise("nope")
 
       result = File.read("runtime.log")
       expect(result).to include "a_spec.rb:1.5"

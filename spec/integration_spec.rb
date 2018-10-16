@@ -1,14 +1,12 @@
-#encoding: utf-8
-
 require 'spec_helper'
 
 describe 'CLI' do
   before do
-    `rm -rf #{folder}`
+    FileUtils.remove_dir(folder, true)
   end
 
   after do
-    `rm -rf #{folder}`
+    FileUtils.remove_dir(folder, true)
   end
 
   def folder
@@ -18,7 +16,7 @@ describe 'CLI' do
   def write(file, content)
     path = "#{folder}/#{file}"
     ensure_folder File.dirname(path)
-    File.open(path, 'w'){|f| f.write content }
+    File.open(path, 'w') { |f| f.write content }
     path
   end
 
@@ -31,18 +29,26 @@ describe 'CLI' do
   end
 
   def executable(options={})
-    "#{bin_folder}/parallel_#{options[:type] || 'test'}"
+    "ruby #{bin_folder}/parallel_#{options[:type] || 'test'}"
   end
 
   def ensure_folder(folder)
-    `mkdir -p #{folder}` unless File.exist?(folder)
+    FileUtils.mkpath(folder) unless File.exist?(folder)
   end
 
   def run_tests(test_folder, options={})
     ensure_folder folder
     processes = "-n #{options[:processes]||2}" unless options[:processes] == false
-    command = "cd #{folder} && #{options[:export]} #{executable(options)} #{test_folder} #{processes} #{options[:add]} 2>&1"
-    result = `#{command}`
+    command = "#{executable(options)} #{test_folder} #{processes} #{options[:add]}"
+    result = ''
+    Dir.chdir(folder) do
+      env = options[:export] || {}
+      IO.popen(env, command, err: [:child, :out]) do |io|
+        yield(io) if block_given?
+        result = io.read
+      end
+    end
+
     raise "FAILED #{command}\n#{result}" if $?.success? == !!options[:fail]
     result
   end
@@ -65,10 +71,10 @@ describe 'CLI' do
     expect(result).to include('TEST2')
 
     # all results present
-    expect(result.scan('1 example, 0 failure').size).to eq(2) # 2 results
-    expect(result.scan('2 examples, 0 failures').size).to eq(1) # 1 summary
-    expect(result.scan(/Finished in \d+\.\d+ seconds/).size).to eq(2)
-    expect(result.scan(/Took \d+ seconds/).size).to eq(1) # parallel summary
+    expect(result).to include_exactly_times('1 example, 0 failure', 2) # 2 results
+    expect(result).to include_exactly_times('2 examples, 0 failures', 1) # 1 summary
+    expect(result).to include_exactly_times(/Finished in \d+(\.\d+)? seconds/, 2)
+    expect(result).to include_exactly_times(/Took \d+ seconds/, 1) # parallel summary
 
     # verify empty groups are discarded. if retained then it'd say 4 processes for 2 specs
     expect(result).to include '2 processes for 2 specs, ~ 1 specs per process'
@@ -83,7 +89,6 @@ describe 'CLI' do
 
   it "respects default encoding when reading child stdout" do
     write 'test/xxx_test.rb', <<-EOF
-      # encoding: utf-8
       require 'test/unit'
       class XTest < Test::Unit::TestCase
         def test_unicode
@@ -95,7 +100,7 @@ describe 'CLI' do
     # this is set. (Otherwise, it defaults to nil and the undefined conversion
     # issue doesn't come up.)
     result = run_tests('test', :fail => true,
-                       :export => 'RUBYOPT=-Eutf-8:utf-8')
+                       :export => {'RUBYOPT' => 'Eutf-8:utf-8'})
     expect(result).to include('¯\_(ツ)_/¯')
   end
 
@@ -108,7 +113,7 @@ describe 'CLI' do
 
   it "shows command with --verbose" do
     write 'spec/xxx_spec.rb', 'describe("it"){it("should"){puts "TEST1"}}'
-    write 'spec/xxx2_spec.rb', 'describe("it"){it("should"){1.should == 1}}'
+    write 'spec/xxx2_spec.rb', 'describe("it"){it("should"){expect(1).to eq(1)}}'
     result = run_tests "spec --verbose", :type => 'rspec'
     expect(result).to include "bundle exec rspec spec/xxx_spec.rb"
     expect(result).to include "bundle exec rspec spec/xxx2_spec.rb"
@@ -116,12 +121,12 @@ describe 'CLI' do
 
   it "fails when tests fail" do
     write 'spec/xxx_spec.rb', 'describe("it"){it("should"){puts "TEST1"}}'
-    write 'spec/xxx2_spec.rb', 'describe("it"){it("should"){1.should == 2}}'
+    write 'spec/xxx2_spec.rb', 'describe("it"){it("should"){expect(1).to eq(2)}}'
     result = run_tests "spec", :fail => true, :type => 'rspec'
 
-    expect(result.scan('1 example, 1 failure').size).to eq(1)
-    expect(result.scan('1 example, 0 failure').size).to eq(1)
-    expect(result.scan('2 examples, 1 failure').size).to eq(1)
+    expect(result).to include_exactly_times('1 example, 1 failure', 1)
+    expect(result).to include_exactly_times('1 example, 0 failure', 1)
+    expect(result).to include_exactly_times('2 examples, 1 failure', 1)
   end
 
   it "can serialize stdout" do
@@ -131,6 +136,13 @@ describe 'CLI' do
 
     expect(result).not_to match(/TEST1.*TEST2.*TEST1/m)
     expect(result).not_to match(/TEST2.*TEST1.*TEST2/m)
+  end
+
+  it "can show simulated output when serializing stdout" do
+    write 'spec/xxx_spec.rb', 'describe("it"){it("should"){sleep 1; puts "TEST1"}}'
+    result = run_tests "spec", :type => 'rspec', :add => "--serialize-stdout", export: {'PARALLEL_TEST_HEARTBEAT_INTERVAL' => '0.2'}
+
+    expect(result).to match(/\.{5}.*TEST1/m)
   end
 
   it "can serialize stdout and stderr" do
@@ -145,12 +157,17 @@ describe 'CLI' do
   context "with given commands" do
     it "can exec given commands with ENV['TEST_ENV_NUMBER']" do
       result = `#{executable} -e 'ruby -e "print ENV[:TEST_ENV_NUMBER.to_s].to_i"' -n 4`
-      expect(result.gsub('"','').split('').sort).to eq(%w[0 2 3 4])
+      expect(result.gsub('"', '').split('').sort).to eq(%w[0 2 3 4])
     end
 
     it "can exec given command non-parallel" do
       result = `#{executable} -e 'ruby -e "sleep(rand(10)/100.0); puts ENV[:TEST_ENV_NUMBER.to_s].inspect"' -n 4 --non-parallel`
-      expect(result.split("\n")).to eq(%w["" "2" "3" "4"])
+      expect(result.split(/\n+/)).to eq(%w["" "2" "3" "4"])
+    end
+
+    it "can exec given command with a restricted set of groups" do
+      result = `#{executable} -e 'ruby -e "print ENV[:TEST_ENV_NUMBER.to_s].to_i"' -n 4 --only-group 1,3`
+      expect(result.gsub('"', '').split('').sort).to eq(%w[0 3])
     end
 
     it "can serialize stdout" do
@@ -170,17 +187,17 @@ describe 'CLI' do
 
   it "runs through parallel_rspec" do
     version = `#{executable} -v`
-    expect(`#{bin_folder}/parallel_rspec -v`).to eq(version)
+    expect(`ruby #{bin_folder}/parallel_rspec -v`).to eq(version)
   end
 
   it "runs through parallel_cucumber" do
     version = `#{executable} -v`
-    expect(`#{bin_folder}/parallel_cucumber -v`).to eq(version)
+    expect(`ruby #{bin_folder}/parallel_cucumber -v`).to eq(version)
   end
 
   it "runs through parallel_spinach" do
     version = `#{executable} -v`
-    expect(`#{bin_folder}/parallel_spinach -v`).to eq(version)
+    expect(`ruby #{bin_folder}/parallel_spinach -v`).to eq(version)
   end
 
   it "runs with --group-by found" do
@@ -191,10 +208,22 @@ describe 'CLI' do
 
   it "runs in parallel" do
     2.times do |i|
-      write "spec/xxx#{i}_spec.rb", 'describe("it") { it("should"){ puts "START"; sleep 1; puts "END" } }'
+      write "spec/xxx#{i}_spec.rb", 'STDOUT.sync = true; describe("it") { it("should"){ puts "START"; sleep 1; puts "END" } }'
     end
     result = run_tests("spec", processes: 2, type: 'rspec')
     expect(result.scan(/START|END/)).to eq(["START", "START", "END", "END"])
+  end
+
+  it "disables spring so correct database is used" do
+    write "spec/xxx_spec.rb", 'puts "SPRING: #{ENV["DISABLE_SPRING"]}"'
+    result = run_tests("spec", processes: 2, type: 'rspec')
+    expect(result).to include "SPRING: 1"
+  end
+
+  it "can enable spring" do
+    write "spec/xxx_spec.rb", 'puts "SPRING: #{ENV["DISABLE_SPRING"]}"'
+    result = run_tests("spec", processes: 2, type: 'rspec', export: {"DISABLE_SPRING" => "0"})
+    expect(result).to include "SPRING: 0"
   end
 
   it "runs with files that have spaces" do
@@ -224,23 +253,19 @@ describe 'CLI' do
   it "can run with test-options" do
     write "spec/x1_spec.rb", "111"
     write "spec/x2_spec.rb", "111"
-    result = run_tests "spec",
-      :add => "--test-options ' --version'",
-      :processes => 2,
-      :type => 'rspec'
+    result = run_tests "spec", add: "--test-options ' --version'", processes: 2, type: 'rspec'
     expect(result).to match(/\d+\.\d+\.\d+.*\d+\.\d+\.\d+/m) # prints version twice
   end
 
   it "runs with PARALLEL_TEST_PROCESSORS processes" do
     skip if RUBY_PLATFORM == "java" # execution expired issue on JRuby
     processes = 5
-    processes.times{|i|
+    processes.times { |i|
       write "spec/x#{i}_spec.rb", "puts %{ENV-\#{ENV['TEST_ENV_NUMBER']}-}"
     }
-    result = run_tests "spec",
-      :export => "PARALLEL_TEST_PROCESSORS=#{processes}",
-      :processes => processes,
-      :type => 'rspec'
+    result = run_tests(
+      "spec", export: {"PARALLEL_TEST_PROCESSORS" => processes.to_s}, processes: processes, type: 'rspec'
+    )
     expect(result.scan(/ENV-.?-/)).to match_array(["ENV--", "ENV-2-", "ENV-3-", "ENV-4-", "ENV-5-"])
   end
 
@@ -256,11 +281,11 @@ describe 'CLI' do
 
   it "can wait_for_other_processes_to_finish" do
     skip if RUBY_PLATFORM == "java" # just too slow ...
-    write "test/a_test.rb", "require 'parallel_tests'; sleep 0.5 ; ParallelTests.wait_for_other_processes_to_finish; puts 'a'"
-    write "test/b_test.rb", "sleep 1; puts 'b'"
-    write "test/c_test.rb", "sleep 1.5; puts 'c'"
-    write "test/d_test.rb", "sleep 2; puts 'd'"
-    expect(run_tests("test", :processes => 4)).to include("b\nc\nd\na\n")
+    write "test/a_test.rb", "require 'parallel_tests'; sleep 0.5 ; ParallelTests.wait_for_other_processes_to_finish; puts 'OutputA'"
+    write "test/b_test.rb", "sleep 1; puts 'OutputB'"
+    write "test/c_test.rb", "sleep 1.5; puts 'OutputC'"
+    write "test/d_test.rb", "sleep 2; puts 'OutputD'"
+    expect(run_tests("test", :processes => 4)).to match(/OutputB\s+OutputC\s+OutputD\s+OutputA/)
   end
 
   it "can run only a single group" do
@@ -279,6 +304,14 @@ describe 'CLI' do
 
   context "RSpec" do
     it_fails_without_any_files "rspec"
+
+    it "captures seed with random failures with --verbose" do
+      write 'spec/xxx_spec.rb', 'describe("it"){it("should"){puts "TEST1"}}'
+      write 'spec/xxx2_spec.rb', 'describe("it"){it("should"){1.should == 2}}'
+      result = run_tests "spec --verbose", :add => "--test-options '--seed 1234'", :fail => true, :type => 'rspec'
+      expect(result).to include("Randomized with seed 1234")
+      expect(result).to include("bundle exec rspec spec/xxx2_spec.rb --seed 1234")
+    end
   end
 
   context "Test::Unit" do
@@ -301,7 +334,7 @@ describe 'CLI' do
     before do
       write "features/steps/a.rb", "
         Given('I print TEST_ENV_NUMBER'){ puts \"YOUR TEST ENV IS \#{ENV['TEST_ENV_NUMBER']}!\" }
-        And('I sleep a bit'){ sleep 0.2 }
+        And('I sleep a bit'){ sleep 0.5 }
         And('I pass'){ true }
         And('I fail'){ fail }
       "
@@ -332,19 +365,16 @@ describe 'CLI' do
 
       log = "tmp/parallel_runtime_cucumber.log"
       write(log, "x")
-      2.times{|i|
+      2.times { |i|
         # needs sleep so that runtime loggers dont overwrite each other initially
         write "features/good#{i}.feature", "Feature: xxx\n  Scenario: xxx\n    Given I print TEST_ENV_NUMBER\n    And I sleep a bit"
       }
       run_tests "features", :type => "cucumber"
-      expect(read(log).gsub(/\.\d+/,'').split("\n")).to match_array([
-        "features/good0.feature:0",
-        "features/good1.feature:0"
-      ])
+      expect(read(log).gsub(/\.\d+/, '').split("\n")).to match_array(["features/good0.feature:0", "features/good1.feature:0"])
     end
 
     it "runs each feature once when there are more processes then features (issue #89)" do
-      2.times{|i|
+      2.times { |i|
         write "features/good#{i}.feature", "Feature: xxx\n  Scenario: xxx\n    Given I print TEST_ENV_NUMBER"
       }
       result = run_tests "features", :type => "cucumber", :add => '-n 3'
@@ -359,33 +389,32 @@ describe 'CLI' do
       write "features/fail2.feature", "Feature: xxx\n  Scenario: xxx\n    Given I fail"
       results = run_tests "features", :processes => 3, :type => "cucumber", :fail => true
 
-      expect(results).to include """
-Failing Scenarios:
-cucumber features/fail2.feature:2 # Scenario: xxx
-cucumber features/fail1.feature:2 # Scenario: xxx
+      expect(results).to include <<-EOF.gsub('        ', '')
+        Failing Scenarios:
+        cucumber features/fail2.feature:2 # Scenario: xxx
+        cucumber features/fail1.feature:2 # Scenario: xxx
 
-3 scenarios (2 failed, 1 passed)
-3 steps (2 failed, 1 passed)
-"""
+        3 scenarios (2 failed, 1 passed)
+        3 steps (2 failed, 1 passed)
+      EOF
     end
 
     it "groups by scenario" do
-      skip "ScenarioLineLogger not supported anymore after upgrading to Cucumber 2.0, please fix!"
       write "features/long.feature", <<-EOS
-      Feature: xxx
-        Scenario: xxx
-          Given I print TEST_ENV_NUMBER
+        Feature: xxx
+          Scenario: xxx
+            Given I print TEST_ENV_NUMBER
 
-        Scenario: xxx
-          Given I print TEST_ENV_NUMBER
+          Scenario: xxx
+            Given I print TEST_ENV_NUMBER
 
-        Scenario Outline: xxx
-          Given I print TEST_ENV_NUMBER
+          Scenario Outline: xxx
+            Given I print TEST_ENV_NUMBER
 
-        Examples:
-          | num |
-          | one |
-          | two |
+          Examples:
+            | num |
+            | one |
+            | two |
       EOS
       result = run_tests "features", :type => "cucumber", :add => "--group-by scenarios"
       expect(result).to include("2 processes for 4 scenarios")
@@ -399,17 +428,33 @@ cucumber features/fail1.feature:2 # Scenario: xxx
 
       expect(result).to include("2 processes for 2 features")
     end
+
+    it "captures seed with random failures with --verbose" do
+      write "features/good1.feature", "Feature: xxx\n  Scenario: xxx\n    Given I fail"
+      result = run_tests "features --verbose", :type => "cucumber", :add => '--test-options "--order random:1234"', :fail => true
+      expect(result).to include("Randomized with seed 1234")
+      expect(result).to match(%r{bundle exec cucumber "?features/good1.feature"? --order random:1234})
+    end
   end
 
   context "Spinach" do
     before do
-      write "features/steps/a.rb", "class A < Spinach::FeatureSteps\n  Given 'I print TEST_ENV_NUMBER' do\n    puts \"YOUR TEST ENV IS \#{ENV['TEST_ENV_NUMBER']}!\"\n  end\n  And 'I sleep a bit' do\n    sleep 0.2\n  end\nend"
+      write "features/steps/a.rb", <<-RUBY.strip_heredoc
+        class A < Spinach::FeatureSteps
+          Given 'I print TEST_ENV_NUMBER' do
+            puts "YOUR TEST ENV IS \#{ENV['TEST_ENV_NUMBER']}!"
+          end
+          And 'I sleep a bit' do
+            sleep 0.2
+          end
+        end
+      RUBY
     end
 
     it "runs tests which outputs accented characters" do
       write "features/good1.feature", "Feature: a\n  Scenario: xxx\n    Given I print accented characters"
       write "features/steps/a.rb", "#encoding: utf-8\nclass A < Spinach::FeatureSteps\nGiven 'I print accented characters' do\n  puts \"I tu też\" \n  end\nend"
-      result = run_tests "features", :type => "spinach", :add => 'features/good1.feature'#, :add => '--pattern good'
+      result = run_tests "features", :type => "spinach", :add => 'features/good1.feature' #, :add => '--pattern good'
       expect(result).to include('I tu też')
     end
 
@@ -417,7 +462,6 @@ cucumber features/fail1.feature:2 # Scenario: xxx
       write "features/good1.feature", "Feature: a\n  Scenario: xxx\n    Given I print TEST_ENV_NUMBER"
       write "features/good2.feature", "Feature: a\n  Scenario: xxx\n    Given I print TEST_ENV_NUMBER"
       write "features/b.feature", "Feature: b\n  Scenario: xxx\n    Given I FAIL" #Expect this not to be run
-      write "features/steps/a.rb", "class A < Spinach::FeatureSteps\nGiven('I print TEST_ENV_NUMBER'){ puts \"YOUR TEST ENV IS \#{ENV['TEST_ENV_NUMBER']}!\" }\nend"
 
       result = run_tests "features", :type => "spinach", :add => '--pattern good'
 
@@ -431,19 +475,16 @@ cucumber features/fail1.feature:2 # Scenario: xxx
       log = "tmp/parallel_runtime_spinach.log"
       write(log, "x")
 
-      2.times{|i|
+      2.times { |i|
         # needs sleep so that runtime loggers dont overwrite each other initially
         write "features/good#{i}.feature", "Feature: A\n  Scenario: xxx\n    Given I print TEST_ENV_NUMBER\n    And I sleep a bit"
       }
-      result = run_tests "features", :type => "spinach"
-      expect(read(log).gsub(/\.\d+/,'').split("\n")).to match_array([
-        "features/good0.feature:0",
-        "features/good1.feature:0"
-      ])
+      run_tests "features", :type => "spinach"
+      expect(read(log).gsub(/\.\d+/, '').split("\n")).to match_array(["features/good0.feature:0", "features/good1.feature:0"])
     end
 
     it "runs each feature once when there are more processes then features (issue #89)" do
-      2.times{|i|
+      2.times { |i|
         write "features/good#{i}.feature", "Feature: A\n  Scenario: xxx\n    Given I print TEST_ENV_NUMBER\n"
       }
       result = run_tests "features", :type => "spinach", :add => '-n 3'
@@ -451,5 +492,30 @@ cucumber features/fail1.feature:2 # Scenario: xxx
     end
 
     it_fails_without_any_files "spinach"
+  end
+
+  describe "graceful shutdown" do
+    # Process.kill on Windows doesn't work as expected. It kills all process group instead of just one process.
+    it "passes on int signal to child processes", unless: Gem.win_platform? do
+      write "spec/test_spec.rb", "describe { specify { sleep 2; p 'here is ok' }; specify { p 'Should not get here'} }"
+      pid = nil
+      Thread.new { sleep 1; Process.kill("INT", pid) }
+      result = run_tests("spec", processes: 2, type: 'rspec', fail: true) { |io| pid = io.pid }
+
+      expect(result).to include("here is ok")
+      expect(result).to include("RSpec is shutting down")
+      expect(result).to_not include("Should not get here")
+    end
+
+    # Process.kill on Windows doesn't work as expected. It kills all process group instead of just one process.
+    it "exits immediately if another int signal is received", unless: Gem.win_platform? do
+      timeout = (ENV["TRAVIS"] ? 4 : 2) # travis is slower so it needs some extra time
+      write "spec/test_spec.rb", "describe { specify { sleep #{timeout}; p 'Should not get here'} }"
+      pid = nil
+      Thread.new { sleep timeout - 0.5; Process.kill("INT", pid) }
+      Thread.new { sleep timeout - 0.3; Process.kill("INT", pid) }
+      result = run_tests("spec", processes: 2, type: 'rspec', fail: false) { |io| pid = io.pid }
+      expect(result).to_not include("Should not get here")
+    end
   end
 end

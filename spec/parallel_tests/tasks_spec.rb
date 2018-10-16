@@ -5,31 +5,32 @@ describe ParallelTests::Tasks do
   describe ".parse_args" do
     it "should return the count" do
       args = {:count => 2}
-      expect(ParallelTests::Tasks.parse_args(args)).to eq([2, "", ""])
+      expect(ParallelTests::Tasks.parse_args(args)).to eq([2, "", "", ""])
     end
 
     it "should default to the prefix" do
       args = {:count => "models"}
-      expect(ParallelTests::Tasks.parse_args(args)).to eq([nil, "models", ""])
+      expect(ParallelTests::Tasks.parse_args(args)).to eq([nil, "models", "", ""])
     end
 
     it "should return the count and pattern" do
       args = {:count => 2, :pattern => "models"}
-      expect(ParallelTests::Tasks.parse_args(args)).to eq([2, "models", ""])
+      expect(ParallelTests::Tasks.parse_args(args)).to eq([2, "models", "", ""])
     end
 
     it "should return the count, pattern, and options" do
       args = {:count => 2, :pattern => "plain", :options => "-p default"}
-      expect(ParallelTests::Tasks.parse_args(args)).to eq([2, "plain", "-p default"])
+      expect(ParallelTests::Tasks.parse_args(args)).to eq([2, "plain", "-p default", ""])
     end
 
     it "should return the count, pattern, and options" do
-      args = {
-        :count => 2,
-        :pattern => "plain",
-        :options => "-p default --group-by steps",
-      }
-      expect(ParallelTests::Tasks.parse_args(args)).to eq([2, "plain", "-p default --group-by steps"])
+      args = {:count => 2, :pattern => "plain", :options => "-p default --group-by steps"}
+      expect(ParallelTests::Tasks.parse_args(args)).to eq([2, "plain", "-p default --group-by steps", ""])
+    end
+
+    it "should return the count, pattern, test options, and pass-through options" do
+      args = {:count => 2, :pattern => "plain", :options => "-p default --group-by steps", :pass_through => "--runtime-log /path/to/log"}
+      expect(ParallelTests::Tasks.parse_args(args)).to eq([2, "plain", "-p default --group-by steps", "--runtime-log /path/to/log"])
     end
   end
 
@@ -49,26 +50,26 @@ describe ParallelTests::Tasks do
 
     it "has the executable" do
       expect(File.file?(full_path)).to eq(true)
-      expect(File.executable?(full_path)).to eq(true)
+      expect(File.executable?(full_path)).to eq(true) unless Gem.win_platform?
     end
 
     it "runs command in parallel" do
-      expect(ParallelTests::Tasks).to receive(:system).with("#{full_path} --exec 'echo'").and_return true
+      expect(ParallelTests::Tasks).to receive(:system).with(/#{full_path} --exec 'echo'$/).and_return true
       ParallelTests::Tasks.run_in_parallel("echo")
     end
 
     it "runs command with :count option" do
-      expect(ParallelTests::Tasks).to receive(:system).with("#{full_path} --exec 'echo' -n 123").and_return true
+      expect(ParallelTests::Tasks).to receive(:system).with(/#{full_path} --exec 'echo' -n 123$/).and_return true
       ParallelTests::Tasks.run_in_parallel("echo", :count => 123)
     end
 
     it "runs without -n with blank :count option" do
-      expect(ParallelTests::Tasks).to receive(:system).with("#{full_path} --exec 'echo'").and_return true
+      expect(ParallelTests::Tasks).to receive(:system).with(/#{full_path} --exec 'echo'$/).and_return true
       ParallelTests::Tasks.run_in_parallel("echo", :count => "")
     end
 
     it "runs command with :non_parallel option" do
-      expect(ParallelTests::Tasks).to receive(:system).with("#{full_path} --exec 'echo' --non-parallel").and_return true
+      expect(ParallelTests::Tasks).to receive(:system).with(/#{full_path} --exec 'echo' --non-parallel$/).and_return true
       ParallelTests::Tasks.run_in_parallel("echo", :non_parallel => true)
     end
 
@@ -79,7 +80,7 @@ describe ParallelTests::Tasks do
     end
   end
 
-  describe ".suppress_output" do
+  describe ".suppress_output", unless: Gem.win_platform? do
     def call(command, grep)
       # Explictly run as a parameter to /bin/sh to simulate how
       # the command will be run by parallel_test --exec
@@ -127,6 +128,17 @@ describe ParallelTests::Tasks do
     end
   end
 
+  describe ".suppress_schema_load_output" do
+    before do
+      allow(ParallelTests::Tasks).to receive(:suppress_output)
+    end
+
+    it 'should call suppress output with command' do
+      ParallelTests::Tasks.suppress_schema_load_output('command')
+      expect(ParallelTests::Tasks).to have_received(:suppress_output).with('command', "^   ->\\|^-- ")
+    end
+  end
+
   describe ".check_for_pending_migrations" do
     after do
       Rake.application.instance_variable_get('@tasks').delete("db:abort_if_pending_migrations")
@@ -163,6 +175,36 @@ describe ParallelTests::Tasks do
       ParallelTests::Tasks.check_for_pending_migrations
       ParallelTests::Tasks.check_for_pending_migrations
       expect(foo).to eq(2)
+    end
+  end
+
+  describe '.purge_before_load' do
+    context 'Rails < 4.2.0' do
+      before do
+        stub_const('Rails', double(version: '3.2.1'))
+      end
+
+      it "should return nil for Rails < 4.2.0" do
+        expect(ParallelTests::Tasks.purge_before_load).to eq nil
+      end
+    end
+
+    context 'Rails > 4.2.0' do
+      before do
+        stub_const('Rails', double(version: '4.2.8'))
+      end
+
+      it "should return db:test:purge when defined" do
+        allow(Rake::Task).to receive(:task_defined?).with('db:test:purge') { true }
+
+        expect(ParallelTests::Tasks.purge_before_load).to eq 'db:test:purge'
+      end
+
+      it "should return app:db:test:purge when db:test:purge is not defined" do
+        allow(Rake::Task).to receive(:task_defined?).with('db:test:purge') { false }
+
+        expect(ParallelTests::Tasks.purge_before_load).to eq 'app:db:test:purge'
+      end
     end
   end
 end

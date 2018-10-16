@@ -55,7 +55,12 @@ shared_examples_for 'gherkin runners' do
     end
 
     it "sanitizes dangerous file runner_names" do
-      should_run_with %r{xx\\ x}
+      if ParallelTests::WINDOWS
+        should_run_with %r{"xx x"}
+      else
+        should_run_with %r{xx\\ x}
+      end
+
       call(['xx x'], 1, 22, {})
     end
 
@@ -67,17 +72,32 @@ shared_examples_for 'gherkin runners' do
       end
 
       it "uses parallel profile" do
-        should_run_with %r{script/#{runner_name} .*foo bar --profile parallel xxx}
+        if ParallelTests::WINDOWS
+          should_run_with %r{script/#{runner_name} .*foo bar --profile parallel "xxx"}
+        else
+          should_run_with %r{script/#{runner_name} .*foo bar --profile parallel xxx}
+        end
+
         call(['xxx'], 1, 22, :test_options => 'foo bar')
       end
 
       it "uses given profile via --profile" do
-        should_run_with %r{script/#{runner_name} .*--profile foo xxx$}
+        if ParallelTests::WINDOWS
+          should_run_with %r{script/#{runner_name} .*--profile foo "xxx"$}
+        else
+          should_run_with %r{script/#{runner_name} .*--profile foo xxx$}
+        end
+
         call(['xxx'], 1, 22, :test_options => '--profile foo')
       end
 
       it "uses given profile via -p" do
-        should_run_with %r{script/#{runner_name} .*-p foo xxx$}
+        if ParallelTests::WINDOWS
+          should_run_with %r{script/#{runner_name} .*-p foo "xxx"$}
+        else
+          should_run_with %r{script/#{runner_name} .*-p foo xxx$}
+        end
+
         call(['xxx'], 1, 22, :test_options => '-p foo')
       end
     end
@@ -155,10 +175,11 @@ shared_examples_for 'gherkin runners' do
 
     it "sums up results for scenarios and steps separately from each other" do
       results = [
-        "7 scenarios (3 failed, 4 passed)", "33 steps (3 failed, 2 skipped, 28 passed)", "4 scenarios (4 passed)",
-        "40 steps (40 passed)", "1 scenario (1 passed)", "1 step (1 passed)"
+        "7 scenarios (2 failed, 1 flaky, 4 passed)", "33 steps (3 failed, 2 skipped, 28 passed)",
+        "4 scenarios (4 passed)", "40 steps (40 passed)",
+        "1 scenario (1 passed)", "1 step (1 passed)"
       ]
-      expect(call(results)).to eq("12 scenarios (3 failed, 9 passed)\n74 steps (3 failed, 2 skipped, 69 passed)")
+      expect(call(results)).to eq("12 scenarios (2 failed, 1 flaky, 9 passed)\n74 steps (3 failed, 2 skipped, 69 passed)")
     end
 
     it "adds same results with plurals" do
@@ -192,7 +213,12 @@ shared_examples_for 'gherkin runners' do
 
       expect(ParallelTests::Test::Runner).to receive(:execute_command) do |a,b,c,d|
         argv = a.split(" ").last(2)
-        expect(argv).to eq(["features/a.rb:23:44", "features/b.rb:12"])
+
+        if ParallelTests::WINDOWS
+          expect(argv).to eq(['"features/a.rb:23:44"', '"features/b.rb:12"'])
+        else
+          expect(argv).to eq(["features/a.rb:23:44", "features/b.rb:12"])
+        end
       end
 
       call(test_files, 1, 2, { :group_by => :scenarios })
